@@ -1,0 +1,26 @@
+{
+    "freelance_monitor": {
+        "exchange_sources": [
+            {
+                "name": "Kwork (Python & Telegram)",
+                "type": "playwright",
+                "url": "https://kwork.ru/projects?c=41&keyword=python",
+                "enabled": true,
+                "tags": [
+                    "python",
+                    "telegram",
+                    "bot"
+                ],
+                "selectors": {
+                    "container": ".want-card.want-card--list",
+                    "title": ".wants-card__header-title",
+                    "link": "a[href*='/projects/']",
+                    "budget": ".wants-card__price",
+                    "description": ".wants-card__description-text",
+                    "deadline": ".want-card__informers-row span.mr8",
+                    "author": ".want-payer-statistic .dib.v-align-t.ml10 div"
+                }
+            }
+        ]
+    }
+}
