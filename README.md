@@ -10,7 +10,82 @@ LLM-оценка релевантности) и отправляет уведо�
 > VK / AmoCRM-адаптерами, `llm_engine`, `freelance_dates`) не входит в этот
 > репозиторий и остаётся приватным.
 
+## Primary project
+
+Этот репозиторий — доменный слой, извлечённый из
+[readlymayson/ai-core](https://github.com/readlymayson/ai-core) (`e53c3fe`).
+
+### Extracted responsibilities
+
+- `FreelanceOrderFilter` — трёхпроходная фильтрация заказов (MD5-дедуп → Pass 1
+  стоп-слова/ключевые слова/бюджет → Pass 2 LLM-оценка релевантности).
+- `BaseMessageReceiver` (ABC) — единый интерфейс для всех транспортов.
+- `ExchangeRSSReceiver`, `ExchangeHtmlReceiver`, `ExchangePlaywrightReceiver` —
+  веб-ресиверы бирж.
+- `FreelanceOrder` — модель заказа с парсингом бюджета из текста.
+- `LeadClassificationResult`, `LeadType`, `classify_lead_text`,
+  `parse_llm_json_response` — классификация лидов (lead_type + classification_source).
+
+### Intentionally excluded responsibilities
+
+- **LLM-движок** (`core.llm_engine`) — остаётся в primary; домен определяет
+  протокол `LLMEngine` (контракт `generate_response`) и собственный тип сообщения.
+- **Даты/время фриланса** (`core.freelance_dates`) — остаются в primary; домен
+  использует stdlib `datetime`.
+- **KworkHttpReceiver** — не переносится (в primary его нет; живёт в приватном
+  сервисе-обёртке).
+- **Логирование** — домен использует stdlib `logging` (не `loguru`).
+- **Конфигурация источников** — пример в `config/config.json`, полная конфигурация
+  в primary.
+
+## Public API & compatibility rules
+
+- Все публичные классы и функции доступны через `from core.<module> import <name>`.
+- `FreelanceOrderFilter` принимает `LLMEngine`-протокол (инъекция через конструктор).
+- `_analyze_relevance()` возвращает `LeadClassificationResult` с полями
+  `lead_type`/`classification_source` (не сырой JSON).
+- Новые параметры конструкторов добавляются только с дефолтами (совместимость
+  существующих вызовов).
+- Тесты не зависят от сети и секретов.
+
+## Documented divergences
+
+| Расхождение | Домен | Primary | Обоснование |
+|---|---|---|---|
+| Классификация лидов | Собственный тип `LeadClassificationResult` с `lead_type` + `classification_source` | Сырой JSON из LLM | Домен определяет контракт; primary может маппить |
+| Логгер | `logging` (stdlib) | `loguru` | Утверждено решением — stdlib, без внешних зависимостей |
+| LLM-протокол | Абстрактный `LLMEngine` с `generate_response` | Прямой импорт `core.llm_engine` | Домен не должен зависеть от реализации |
+| KworkHttpReceiver | Отсутствует | Отсутствует (в приватном сервисе) | Не переносится |
+
 ## Возможности
+
+- **Единый интерфейс приёмников** — `BaseMessageReceiver` (ABC): любой транспорт
+  (Telethon, VK, AmoCRM, биржи) реализует 4 метода (`start/stop/is_running/validate_chats`)
+  и отдаёт сообщения через коллбэк `on_message`.
+- **Три веб-ресивера бирж** (`ExchangeRSSReceiver`, `ExchangeHtmlReceiver`,
+  `ExchangePlaywrightReceiver`) — реализуют `BaseMessageReceiver` без изменений
+  домена:
+  - RSS/Atom — на stdlib `xml.etree`, без внешних зависимостей;
+  - SSR-HTML — `aiohttp` + `BeautifulSoup`, CSS-селекторы настраиваются в конфиге
+    источника;
+  - SPA/JS (Kwork, FL.ru и т.п.) — Playwright (Chromium), один браузер
+    переиспользуется между циклами, ротация User-Agent против антиботов,
+    парсинг через чистые функции (тестируется без браузера).
+- **Трёхпроходная фильтрация** `FreelanceOrderFilter`:
+  - **Pass 0** — дедупликация по MD5 (in-memory `deque`, опционально Redis-сет
+    с TTL, переживает рестарты и работает между процессами);
+  - **Pass 1** — стоп-слова → ключевые слова (regex по границам слов) →
+    минимальный бюджет (из текста, с учётом валют и диапазонов);
+  - **Pass 2** — LLM-оценка релевантности: строгий system-prompt под нишу,
+    JSON-ответ (`relevant/budget/tech_stack/task_summary/urgency`), семафор для
+    ограничения параллельных запросов, эскалация `max_tokens` для
+    reasoning-моделей.
+- **Статистика** — счётчики по каждой причине отсева (дубли/стоп-слова/бюджет/
+  LLM-отклонения), попадают в сводку уведомлений.
+- **Уведомления** — HTML-сообщение о найденном заказе (бюджет, стек, срочность,
+  источник, ссылка) через `notify_callback`.
+- **Обновление на лету** — список источников и ключевых слов меняется без
+  перезапуска сервиса.
 
 - **Единый интерфейс приёмников** — `BaseMessageReceiver` (ABC): любой транспорт
   (Telethon, VK, AmoCRM, биржи) реализует 4 метода (`start/stop/is_running/validate_chats`)
