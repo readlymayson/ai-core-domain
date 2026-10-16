@@ -15,6 +15,7 @@ import json
 import re
 import time
 import copy
+import logging
 from abc import ABC, abstractmethod
 from collections import deque
 from typing import (
@@ -25,7 +26,7 @@ from typing import (
     Optional,
 )
 
-from loguru import logger
+logger = logging.getLogger(__name__)
 
 # Тип коллбэка on_message для BaseMessageReceiver:
 # (raw_text, source_id, message_link, chat_title, sender_username) -> None
@@ -88,10 +89,12 @@ class FreelanceOrderFilter:
         config,
         llm_engine,
         notify_callback: Callable[[str], Awaitable[None]],
+        clock=None,
     ):
         self._config = config
         self._llm_engine = llm_engine
         self._notify_callback = notify_callback
+        self._clock = clock  # None → stdlib datetime
 
         # In-memory кэш MD5 (дедупликация)
         self._seen_hashes: deque = deque(maxlen=config.dedup_cache_size)
@@ -329,14 +332,16 @@ class FreelanceOrderFilter:
         )
 
     async def _analyze_relevance(self, text: str) -> Dict:
-        """LLM-оценка релевантности заказа.
+        """LLM-оценка релевантности заказа + классификация лида.
 
         Запрашивает у LLM JSON с полями:
             relevant (bool), budget (str|None), tech_stack (str|None),
             task_summary (str|None), urgency (str|None)
 
         Returns:
-            Dict с этими полями (по умолчанию relevant=False при ошибке).
+            Dict с полями relevant/budget/tech_stack/task_summary/urgency
+            + lead_type/classification_source/classification_error
+            (по умолчанию relevant=False при ошибке).
         """
         self._stats["llm_calls"] += 1
 
@@ -363,18 +368,24 @@ class FreelanceOrderFilter:
             '}'
         )
 
-        from core.llm_engine import Message as LLMMessage
+        from core.lead_classification import Message as LLMMessage
 
         # Текущая дата для анализа (не выводится пользователю в Telegram,
         # нужна LLM для оценки срочности/актуальности заказа)
-        from core.freelance_dates import fmt_dt, now_msk
+        if self._clock is not None:
+            now = self._clock.now()
+            today_str = self._clock.fmt(now)
+        else:
+            from datetime import datetime, timezone
+            now = datetime.now(timezone.utc)
+            today_str = now.strftime("%Y-%m-%d %H:%M UTC")
 
         llm_messages = [
             LLMMessage(role="system", content=system_prompt),
             LLMMessage(
                 role="user",
                 content=(
-                    f"Сегодня: {fmt_dt(now_msk())} (МСК).\n\n"
+                    f"Сегодня: {today_str} (МСК).\n\n"
                     f"Оцени этот заказ:\n\n{text[:3000]}"
                 ),
             ),
@@ -397,64 +408,34 @@ class FreelanceOrderFilter:
 
             raw_content = response.content.strip()
 
-            # Очистка JSON от markdown-обёртки
-            cleaned = re.sub(
-                r'^```(?:json)?\s*', '', raw_content, flags=re.IGNORECASE
-            )
-            cleaned = re.sub(r'\s*```$', '', cleaned)
+            from core.lead_classification import parse_llm_json_response, classify_lead_text
 
-            # Вытаскиваем ПЕРВЫЙ JSON-объект из текста (модель могла добавить
-            # пролог/эпилог вокруг JSON, или завершить текст после фигурной скобки).
-            data = None
-            if cleaned.startswith("{"):
-                try:
-                    data = json.loads(cleaned)
-                except json.JSONDecodeError:
-                    data = None
-            if data is None:
-                brace_start = cleaned.find("{")
-                if brace_start != -1:
-                    depth = 0
-                    for i in range(brace_start, len(cleaned)):
-                        ch = cleaned[i]
-                        if ch == "{":
-                            depth += 1
-                        elif ch == "}":
-                            depth -= 1
-                            if depth == 0:
-                                candidate = cleaned[brace_start : i + 1]
-                                try:
-                                    data = json.loads(candidate)
-                                except json.JSONDecodeError:
-                                    data = None
-                                break
+            data = parse_llm_json_response(raw_content)
             if data is None:
                 logger.warning(
                     f"LLM вернул не-JSON ответ: {raw_content[:200]!r}"
                 )
-                return {"relevant": False}
+                return {"relevant": False, "classification_error": "invalid_json"}
 
             # Валидация полей
             if not isinstance(data.get("relevant"), bool):
                 logger.warning("LLM вернул relevant не bool")
-                return {"relevant": False}
-            return {
-                "relevant": data["relevant"],
-                "budget": data.get("budget"),
-                "tech_stack": data.get("tech_stack"),
-                "task_summary": data.get("task_summary"),
-                "urgency": data.get("urgency"),
-            }
+                return {"relevant": False, "classification_error": "invalid_relevant"}
+
+            # Классификация лида (вариант A — контракт в домене)
+            classification = classify_lead_text(text, data)
+            result = classification.to_dict()
+            return result
 
         except (json.JSONDecodeError, KeyError, TypeError, AssertionError) as e:
             logger.warning(f"Ошибка парсинга JSON от LLM: {e}")
-            return {"relevant": False}
+            return {"relevant": False, "classification_error": str(e)}
         except asyncio.TimeoutError:
             logger.warning("Таймаут LLM-оценки (>15с)")
-            return {"relevant": False}
+            return {"relevant": False, "classification_error": "timeout"}
         except Exception as e:
             logger.warning(f"Неожиданная ошибка LLM-оценки: {e}")
-            return {"relevant": False}
+            return {"relevant": False, "classification_error": str(e)}
 
     async def _notify_admin(
         self,

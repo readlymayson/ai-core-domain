@@ -1,3 +1,5 @@
-# Доменный слой ai-core: только обязательные зависимости.
-# Остальные (aiohttp, beautifulsoup4, playwright, loguru и пр.) —
-# часть приложения-обёртки и подключаются в приватном репозитории.
+# Доменный слой ai-core: runtime-зависимости.
+# aiohttp и beautifulsoup4 — опциональны (try/except в freelance_exchange_scraper.py).
+# Playwright — только для ExchangePlaywrightReceiver (опционально).
+aiohttp>=3.8,<4.0
+beautifulsoup4>=4.12,<5.0

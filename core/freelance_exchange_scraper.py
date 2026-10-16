@@ -28,7 +28,9 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional
 from urllib.parse import urljoin, urlparse
 
-from loguru import logger
+import logging
+
+logger = logging.getLogger(__name__)
 
 try:
     import aiohttp
